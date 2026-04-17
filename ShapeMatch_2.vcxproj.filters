@@ -1,0 +1,58 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="源文件">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;cppm;ixx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="头文件">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="Asset">
+      <UniqueIdentifier>{18f70eaf-3a40-47e8-b3d8-58eb8ecccb77}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="main.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="shapeTrain.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="shapeMatch.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="shapeMatch.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="shapeTrain.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="resource.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="Asset\target1.png">
+      <Filter>Asset</Filter>
+    </Image>
+    <Image Include="Asset\target2.png">
+      <Filter>Asset</Filter>
+    </Image>
+    <Image Include="Asset\target3.png">
+      <Filter>Asset</Filter>
+    </Image>
+    <Image Include="Asset\temp1.png">
+      <Filter>Asset</Filter>
+    </Image>
+    <Image Include="Asset\temp2.png">
+      <Filter>Asset</Filter>
+    </Image>
+    <Image Include="Asset\temp3.png">
+      <Filter>Asset</Filter>
+    </Image>
+  </ItemGroup>
+</Project>
