@@ -19,7 +19,7 @@ int main() {
     cv::Sobel(target_gray, target_gx, CV_16S, 1, 0, 3);
     cv::Sobel(target_gray, target_gy, CV_16S, 0, 1, 3);
 
-    // 匹配
+    // 匹配参数
     float angleStart = 0.0f;
     float angleEnd = 360.0f;
     float angleStep = 12.0f; // 步长

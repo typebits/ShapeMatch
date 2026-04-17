@@ -1,0 +1,32 @@
+﻿  shapeMatch.cpp
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeMatch.cpp(15,23): warning C4018: “<”: 有符号/无符号不匹配
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeMatch.cpp(20,26): warning C4244: “初始化”: 从“float”转换到“unsigned int”，可能丢失数据
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeMatch.cpp(23,23): warning C4018: “<”: 有符号/无符号不匹配
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeMatch.cpp(24,27): warning C4018: “<”: 有符号/无符号不匹配
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeMatch.cpp(44,30): warning C4244: “初始化”: 从“int”转换到“float”，可能丢失数据
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeMatch.cpp(45,30): warning C4244: “初始化”: 从“int”转换到“float”，可能丢失数据
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeMatch.cpp(316,75): warning C4244: “参数”: 从“float”转换到“_Tp”，可能丢失数据
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeMatch.cpp(316,75): warning C4244:         with
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeMatch.cpp(316,75): warning C4244:         [
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeMatch.cpp(316,75): warning C4244:             _Tp=int
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeMatch.cpp(316,75): warning C4244:         ]
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeMatch.cpp(316,59): warning C4244: “参数”: 从“float”转换到“_Tp”，可能丢失数据
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeMatch.cpp(316,59): warning C4244:         with
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeMatch.cpp(316,59): warning C4244:         [
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeMatch.cpp(316,59): warning C4244:             _Tp=int
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeMatch.cpp(316,59): warning C4244:         ]
+  shapeTrain.cpp
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeTrain.cpp(8,20): warning C4244: “初始化”: 从“double”转换到“float”，可能丢失数据
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeTrain.cpp(58,48): warning C4244: “参数”: 从“double”转换到“_Tp”，可能丢失数据
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeTrain.cpp(58,48): warning C4244:         with
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeTrain.cpp(58,48): warning C4244:         [
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeTrain.cpp(58,48): warning C4244:             _Tp=float
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeTrain.cpp(58,48): warning C4244:         ]
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeTrain.cpp(58,31): warning C4244: “参数”: 从“double”转换到“_Tp”，可能丢失数据
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeTrain.cpp(58,31): warning C4244:         with
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeTrain.cpp(58,31): warning C4244:         [
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeTrain.cpp(58,31): warning C4244:             _Tp=float
+D:\Code\CPP_OpenCV\ShapeMatch_2\shapeTrain.cpp(58,31): warning C4244:         ]
+  main.cpp
+  正在生成代码...
+  ShapeMatch.vcxproj -> D:\Code\CPP_OpenCV\ShapeMatch_2\x64\Debug\ShapeMatch.exe
