@@ -44,7 +44,7 @@ int main() {
 
     auto start = std::chrono::high_resolution_clock::now(); // 计时
 
-    // 2. 多角度匹配循环
+    // 多角度匹配循环
     for (size_t i = 0; i < templates.size() ; ++i) {
         // 初始化 Level 0
         pyramidModels[0] = templates[i];

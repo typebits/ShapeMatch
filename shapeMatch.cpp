@@ -34,9 +34,9 @@ std::vector<Points> findAllMatches(const cv::Mat& tgx, const cv::Mat& tgy,
                 unsigned int x0 = static_cast<int>(curX);
                 unsigned int y0 = static_cast<int>(curY);
 
-                if (x0 >= 0 && x0 < cols - 1 && y0 >= 0 && y0 < rows - 1) {
-                    int x1 = x0 + 1;
-                    int y1 = y0 + 1;
+                if (x0 < cols - 1 && y0 < rows - 1) {
+                    unsigned int x1 = x0 + 1;
+                    unsigned int y1 = y0 + 1;
 
                     //float sx = (pX[y0][x0] + pX[y0][x1] + pX[y1][x0] + pX[y1][x1]) * 0.25f;
                     //float sy = (pY[y0][x0] + pY[y0][x1] + pY[y1][x0] + pY[y1][x1]) * 0.25f;
@@ -52,7 +52,7 @@ std::vector<Points> findAllMatches(const cv::Mat& tgx, const cv::Mat& tgy,
                         // 点积累加
                         float dot = (modelPoints[m].u * sx + modelPoints[m].v * sy) * invMag;
                         totalDirectionScore += dot;
-                        validCount++;
+                        ++validCount;
                     }
                 }
 
@@ -125,7 +125,7 @@ float PointScore(const cv::Mat& tgx, const cv::Mat& tgy,
         if (static_cast<unsigned>(curY) < static_cast<unsigned>(rows) &&
             static_cast<unsigned>(curX) < static_cast<unsigned>(cols)) {
 
-            int offset = curY * step + curX;
+            unsigned int offset = curY * step + curX;
             float gxS = static_cast<float>(pGdxBase[offset]);
             float gyS = static_cast<float>(pGdyBase[offset]);
 
@@ -139,7 +139,7 @@ float PointScore(const cv::Mat& tgx, const cv::Mat& tgy,
                 if (magSqT > 0.1f) {
                     float dotProduct = gxS * gxT + gyS * gyT;
                     totalCosineScore += dotProduct / std::sqrt(magSqS * magSqT);
-                    validCount++;
+                    ++validCount;
                 }
             }
         }
@@ -171,7 +171,7 @@ std::vector<Points> matchModelPyramidN(
         }
     }
 
-    int topIdx = numLevels - 1;
+    unsigned int topIdx = numLevels - 1;
      
     // 寻找顶层的粗特征
     std::vector<Points> LayerResults = findAllMatches(
@@ -197,6 +197,7 @@ std::vector<Points> matchModelPyramidN(
             int cx = static_cast<int>(prevRes.dx + prevRes.dx + 0.5f);
             int cy = static_cast<int>(prevRes.dy + prevRes.dy + 0.5f);
 
+            // 5 * 5
             int rStart = std::max(0, cy - 2);
             int rEnd = std::min(rows - 1, cy + 2);
             int cStart = std::max(0, cx - 2);
