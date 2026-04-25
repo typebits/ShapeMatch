@@ -2,6 +2,9 @@
 #include <opencv2/opencv.hpp>
 #include <vector>
 #include <cmath>
+#include <immintrin.h>
+#include <omp.h>
+#include <mutex>
 
 struct Points {
     float dx, dy;   // 相对质心的坐标
@@ -11,7 +14,8 @@ struct Points {
 };
 
 std::vector<Points> findAllMatches(const cv::Mat& tgx, const cv::Mat& tgy,
-    const std::vector<Points>& instances,
+    //const std::vector<Points>& instances,
+    std::vector<Points> instances,
     float minScore, float minDist);
 
 void downsample2x2(const cv::Mat& src, cv::Mat& dst);

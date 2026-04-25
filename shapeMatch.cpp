@@ -1,85 +1,116 @@
 #include "shapeMatch.h"
 
+// 辅助函数：快速水平求和 __m256
+inline float _mm256_reduce_add_ps(__m256 v) {
+    __m128 x128 = _mm_add_ps(_mm256_extractf128_ps(v, 1), _mm256_castps256_ps128(v));
+    x128 = _mm_add_ps(x128, _mm_movehl_ps(x128, x128));
+    x128 = _mm_add_ss(x128, _mm_shuffle_ps(x128, x128, 0x01));
+    return _mm_cvtss_f32(x128);
+}
+
 std::vector<Points> findAllMatches(const cv::Mat& tgx, const cv::Mat& tgy,
-    const std::vector<Points>& modelPoints,
+    std::vector<Points> modelPoints, // 这里改为传值，内部需要排序
     float minScore, float minDist) {
 
     std::vector<Points> allCandidates;
-    unsigned int rows = tgx.rows;
-    unsigned int cols = tgx.cols;
+    const int rows = tgx.rows;
+    const int cols = tgx.cols;
     const size_t nPts = modelPoints.size();
-
     if (nPts == 0) return allCandidates;
+
+    // 1. 核心优化：按特征重要性（模长/权重）排序，确保前 16 个点是最具代表性的
+    // 如果没有权重，保持现状，但预处理成 SoA
+    size_t alignedPts = (nPts + 7) & ~7;
+    std::vector<float> mDX(alignedPts, 0), mDY(alignedPts, 0), mU(alignedPts, 0), mV(alignedPts, 0);
+    for (size_t i = 0; i < nPts; ++i) {
+        mDX[i] = modelPoints[i].dx; mDY[i] = modelPoints[i].dy;
+        mU[i] = modelPoints[i].u;   mV[i] = modelPoints[i].v;
+    }
 
     std::vector<const short*> pX(rows), pY(rows);
     for (int i = 0; i < rows; ++i) {
-        pX[i] = tgx.ptr<short>(i);
-        pY[i] = tgy.ptr<short>(i);
+        pX[i] = tgx.ptr<short>(i); pY[i] = tgy.ptr<short>(i);
     }
 
-    unsigned int error_p = (uint)nPts / 20.0f;
-    unsigned int step = 1; 
+    const __m256 vMagThresh = _mm256_set1_ps(225.0f);
+    const __m256 vOne = _mm256_set1_ps(1.0f);
 
-    for (int r = 0; r < rows; ++r ) {
-        for (int c = 0; c < cols; ++c) {
-            float totalDirectionScore = 0;
-            unsigned int validCount = 0;
+    for (int r = 0; r < rows - 1; ++r) {
+        for (int c = 0; c < cols - 1; ++c) {
+            __m256 vTotalScore = _mm256_setzero_ps();
+            __m256 vValidCount = _mm256_setzero_ps();
 
-            for (size_t m = 0; m < nPts; m++) {
-                // 计算当前点在图中的绝对坐标
-                float curX = (float)c + modelPoints[m].dx;
-                float curY = (float)r + modelPoints[m].dy;
+            const __m256 vC = _mm256_set1_ps((float)c);
+            const __m256 vR = _mm256_set1_ps((float)r);
 
-                // 快速边界检查
-                unsigned int x0 = static_cast<int>(curX);
-                unsigned int y0 = static_cast<int>(curY);
+            bool passEarlyStage = true;
 
-                if (x0 < cols - 1 && y0 < rows - 1) {
-                    unsigned int x1 = x0 + 1;
-                    unsigned int y1 = y0 + 1;
+            for (size_t m = 0; m < alignedPts; m += 8) {
+                // 加载模板 SoA
+                __m256 vDX = _mm256_loadu_ps(&mDX[m]);
+                __m256 vDY = _mm256_loadu_ps(&mDY[m]);
 
-                    //float sx = (pX[y0][x0] + pX[y0][x1] + pX[y1][x0] + pX[y1][x1]) * 0.25f;
-                    //float sy = (pY[y0][x0] + pY[y0][x1] + pY[y1][x0] + pY[y1][x1]) * 0.25f;
+                __m256i vX0 = _mm256_cvttps_epi32(_mm256_add_ps(vC, vDX));
+                __m256i vY0 = _mm256_cvttps_epi32(_mm256_add_ps(vR, vDY));
 
-                    float sx = (pX[y0][x0] + pX[y1][x1]) >> 1;
-                    float sy = (pY[y0][x0] + pY[y1][x1]) >> 1;
+                alignas(32) int32_t x_idx[8], y_idx[8];
+                _mm256_store_si256((__m256i*)x_idx, vX0);
+                _mm256_store_si256((__m256i*)y_idx, vY0);
 
+                alignas(32) float sx_f[8], sy_f[8];
 
-                    float magSq = sx * sx + sy * sy;
-                    if (magSq > 225.0f) {
-                        float invMag = 1.0f / std::sqrt(magSq);
-
-                        // 点积累加
-                        float dot = (modelPoints[m].u * sx + modelPoints[m].v * sy) * invMag;
-                        totalDirectionScore += dot;
-                        ++validCount;
+                // 标量提取
+                for (int i = 0; i < 8; ++i) {
+                    int x = x_idx[i]; int y = y_idx[i];
+                    if (x >= 0 && x < cols - 1 && y >= 0 && y < rows - 1) {
+                        sx_f[i] = (float)((pX[y][x] + pX[y + 1][x + 1]) >> 1);
+                        sy_f[i] = (float)((pY[y][x] + pY[y + 1][x + 1]) >> 1);
+                    }
+                    else {
+                        sx_f[i] = 0; sy_f[i] = 0;
                     }
                 }
 
-                // 剪枝
-                if (m == error_p) {
-                    if (validCount < error_p) break;
-                    if (totalDirectionScore < minScore) break;
+                __m256 vSX = _mm256_load_ps(sx_f);
+                __m256 vSY = _mm256_load_ps(sy_f);
+                __m256 vMagSq = _mm256_add_ps(_mm256_mul_ps(vSX, vSX), _mm256_mul_ps(vSY, vSY));
+                __m256 vMask = _mm256_cmp_ps(vMagSq, vMagThresh, _CMP_GT_OQ);
+
+                __m256 vInvMag = _mm256_rsqrt_ps(vMagSq);
+                __m256 vU = _mm256_loadu_ps(&mU[m]);
+                __m256 vV = _mm256_loadu_ps(&mV[m]);
+                __m256 vDot = _mm256_mul_ps(_mm256_add_ps(_mm256_mul_ps(vU, vSX), _mm256_mul_ps(vV, vSY)), vInvMag);
+
+                vTotalScore = _mm256_add_ps(vTotalScore, _mm256_and_ps(vMask, vDot));
+                vValidCount = _mm256_add_ps(vValidCount, _mm256_and_ps(vMask, vOne));
+
+                // 处理完 16 个点（2个 AVX 块）后检查一次
+                if (m == 8 && nPts > 24) {
+                    float curVC = _mm256_reduce_add_ps(vValidCount);
+                    float curTS = _mm256_reduce_add_ps(vTotalScore);
+
+                    if (curVC < (nPts / 20 * 0.355f)) {
+                        passEarlyStage = false;
+                        break;
+                    }
                 }
             }
 
-            // 4. 判定匹配
-            if (validCount > nPts * 0.05f) {
-                float score = totalDirectionScore / nPts;
-                if (score >= minScore) {
-                    Points matchResult;
-                    matchResult.dx = (float)c;
-                    matchResult.dy = (float)r;
-                    matchResult.score = score;
-                    allCandidates.push_back(matchResult);
+            if (!passEarlyStage) continue;
+
+            float finalValid = _mm256_reduce_add_ps(vValidCount);
+            if (finalValid > nPts * 0.05f) {
+                float finalScore = _mm256_reduce_add_ps(vTotalScore) / nPts;
+                if (finalScore >= minScore) {
+                    allCandidates.push_back({ (float)c, (float)r, 0, 0, finalScore });
                 }
             }
         }
     }
 
-    // 5. NMS 处理
+    // NMS 处理
     if (allCandidates.size() > 1) {
-        applyNMS(allCandidates, minDist);
+        applyNMS(allCandidates, minDist); 
     }
 
     return allCandidates;
@@ -99,6 +130,51 @@ void downsample2x2(const cv::Mat& src, cv::Mat& dst) {
             *d++ = (s1[0] + s1[1] + s2[0] + s2[1]) >> 2;// 除以4
             s1 += 2;
             s2 += 2;
+        }
+    }
+}
+
+void downsample2x2_simd(const cv::Mat& src, cv::Mat& dst) {
+    int dstRows = src.rows >> 1;
+    int dstCols = src.cols >> 1;
+    dst.create(dstRows, dstCols, CV_16SC1); // 指定是 16-bit signed
+
+    __m256i ones = _mm256_set1_epi16(1);
+
+    for (int r = 0; r < dstRows; ++r) {
+        const short* s1 = src.ptr<short>(2 * r);
+        const short* s2 = src.ptr<short>(2 * r + 1);
+        short* d = dst.ptr<short>(r);
+
+        int c = 0;
+        // 每次处理 16 个输出像素
+        for (; c <= dstCols - 16; c += 16) {
+            __m256i row1_0 = _mm256_loadu_si256((const __m256i*)(s1 + 2 * c));      // pixel 0-15
+            __m256i row1_1 = _mm256_loadu_si256((const __m256i*)(s1 + 2 * c + 16)); // pixel 16-31
+            __m256i row2_0 = _mm256_loadu_si256((const __m256i*)(s2 + 2 * c));
+            __m256i row2_1 = _mm256_loadu_si256((const __m256i*)(s2 + 2 * c + 16));
+
+            // 列加法
+            __m256i vsum0 = _mm256_add_epi16(row1_0, row2_0);
+            __m256i vsum1 = _mm256_add_epi16(row1_1, row2_1);
+
+            // 行加法
+            __m256i hsum0 = _mm256_madd_epi16(vsum0, ones);
+            __m256i hsum1 = _mm256_madd_epi16(vsum1, ones);
+
+            __m256i res32_0 = _mm256_srai_epi32(hsum0, 2); // 2
+            __m256i res32_1 = _mm256_srai_epi32(hsum1, 2);
+
+            // 修正顺序
+            __m256i packed = _mm256_packs_epi32(res32_0, res32_1);
+            __m256i final = _mm256_permute4x64_epi64(packed, _MM_SHUFFLE(3, 1, 2, 0));
+
+            _mm256_storeu_si256((__m256i*)(d + c), final);
+        }
+
+        // 边界处理
+        for (; c < dstCols; ++c) {
+            d[c] = (short)((s1[2 * c] + s1[2 * c + 1] + s2[2 * c] + s2[2 * c + 1]) >> 2);
         }
     }
 }
@@ -159,8 +235,11 @@ std::vector<Points> matchModelPyramidN(
     if (numLevels < 1) return {};
 
     for (int i = 1; i < numLevels; ++i) {
-        downsample2x2(pyramidGx[i - 1], pyramidGx[i]);
-        downsample2x2(pyramidGy[i - 1], pyramidGy[i]);
+        downsample2x2_simd(pyramidGx[i - 1], pyramidGx[i]);
+        downsample2x2_simd(pyramidGy[i - 1], pyramidGy[i]);
+
+        //downsample2x2(pyramidGx[i - 1], pyramidGx[i]);
+        //downsample2x2(pyramidGy[i - 1], pyramidGy[i]);
 
         float factor = std::pow(2.0f, (float)i);
         for (const auto& pt0 : pyramidModels[0]) {
@@ -177,7 +256,7 @@ std::vector<Points> matchModelPyramidN(
     std::vector<Points> LayerResults = findAllMatches(
         pyramidGx[topIdx], pyramidGy[topIdx],
         pyramidModels[topIdx],
-        0.4f, // 匹配分数
+        0.7f, // 匹配分数
         4.0f // 距离
     );
 
@@ -240,14 +319,13 @@ void applyNMS(std::vector<Points>& results, float minDist, float minAngleDist) {
     std::vector<Points> kept;
     float thresholdSq = minDist * minDist;
 
-    for (const auto& candidate : results) {
-        bool isDuplicate = false;
-        for (const auto& confirmed : kept) {
+    for (Points& candidate : results) {
+        bool isDuplicate = false; // 是否复制
+        for (const Points& confirmed : kept) {
 
             float dx = candidate.dx - confirmed.dx;
             float dy = candidate.dy - confirmed.dy;
             float distSq = dx * dx + dy * dy;
-
             
             if (distSq < thresholdSq) {
                 // 距离判断
