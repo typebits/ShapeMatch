@@ -2,6 +2,10 @@
 #include "shapeMatch.h"
 #include "shapeTrain.h"
 
+#include <execution>
+#include <algorithm>
+#include <mutex>
+
 int main() {
     cv::Mat img_temp = cv::imread("Asset\\temp3.png");
     cv::Mat img_target = cv::imread("Asset\\target3.png");
@@ -41,21 +45,30 @@ int main() {
     pyramidGx[0] = target_gx;
     pyramidGy[0] = target_gy;
 
+    int maxThreads = omp_get_max_threads();
+
+    // 预分配所有线程需要的金字塔空间
+    std::vector<std::vector<std::vector<Points>>> threadPyramids(maxThreads, std::vector<std::vector<Points>>(Levels));
 
     auto start = std::chrono::high_resolution_clock::now(); // 计时
 
-    // 多角度匹配循环
-    for (size_t i = 0; i < templates.size() ; ++i) {
-        // 初始化 Level 0
-        pyramidModels[0] = templates[i];
+#pragma omp parallel for schedule(dynamic)
+    for (int i = 0; i < (int)templates.size(); ++i) {
+        int tid = omp_get_thread_num(); // 获取当前线程 ID
+
+        // 使用预分配好的空间，避免重复 allocate
+        threadPyramids[tid][0] = templates[i];
 
         auto results = matchModelPyramidN(
-            pyramidGx, pyramidGy, pyramidModels, Levels
+            pyramidGx, pyramidGy, threadPyramids[tid], Levels
         );
 
-        for (auto& r : results) {
-            r.angle = angleStart + i * angleStep; // 统一赋值角度
-            allResults.push_back(r);
+#pragma omp critical
+        {
+            for (auto& r : results) {
+                r.angle = angleStart + i * angleStep;
+                allResults.push_back(r);
+            }
         }
     }
 

@@ -1,25 +1,37 @@
 #include "shapeMatch.h"
 
-// 辅助函数：快速水平求和 __m256
+// 高性能水平累加
 inline float _mm256_reduce_add_ps(__m256 v) {
-    __m128 x128 = _mm_add_ps(_mm256_extractf128_ps(v, 1), _mm256_castps256_ps128(v));
-    x128 = _mm_add_ps(x128, _mm_movehl_ps(x128, x128));
-    x128 = _mm_add_ss(x128, _mm_shuffle_ps(x128, x128, 0x01));
-    return _mm_cvtss_f32(x128);
+    __m128 lo = _mm256_castps256_ps128(v);
+    __m128 hi = _mm256_extractf128_ps(v, 1);
+    lo = _mm_add_ps(lo, hi);
+    __m128 shuf = _mm_movehdup_ps(lo);
+    lo = _mm_add_ps(lo, shuf);
+    shuf = _mm_movehl_ps(shuf, lo);
+    lo = _mm_add_ss(lo, shuf);
+    return _mm_cvtss_f32(lo);
 }
 
 std::vector<Points> findAllMatches(const cv::Mat& tgx, const cv::Mat& tgy,
-    std::vector<Points> modelPoints, // 这里改为传值，内部需要排序
-    float minScore, float minDist) {
+    std::vector<Points> modelPoints, float minScore, float minDist) {
 
-    std::vector<Points> allCandidates;
     const int rows = tgx.rows;
     const int cols = tgx.cols;
     const size_t nPts = modelPoints.size();
+    std::vector<Points> allCandidates;
     if (nPts == 0) return allCandidates;
 
-    // 1. 核心优化：按特征重要性（模长/权重）排序，确保前 16 个点是最具代表性的
-    // 如果没有权重，保持现状，但预处理成 SoA
+    // --- 1. 预处理：Float 转换与平滑 (必须移出主循环) ---
+    cv::Mat tgxf, tgyf;
+    tgx.convertTo(tgxf, CV_32F);
+    tgy.convertTo(tgyf, CV_32F);
+    // 可选：在这里做一次 2x2 boxFilter 代替之前的 (p+p)>>1 逻辑
+
+    const float* pBaseX = (const float*)tgxf.data;
+    const float* pBaseY = (const float*)tgyf.data;
+    const int step = (int)(tgxf.step / sizeof(float));
+
+    // SoA 布局
     size_t alignedPts = (nPts + 7) & ~7;
     std::vector<float> mDX(alignedPts, 0), mDY(alignedPts, 0), mU(alignedPts, 0), mV(alignedPts, 0);
     for (size_t i = 0; i < nPts; ++i) {
@@ -27,92 +39,102 @@ std::vector<Points> findAllMatches(const cv::Mat& tgx, const cv::Mat& tgy,
         mU[i] = modelPoints[i].u;   mV[i] = modelPoints[i].v;
     }
 
-    std::vector<const short*> pX(rows), pY(rows);
-    for (int i = 0; i < rows; ++i) {
-        pX[i] = tgx.ptr<short>(i); pY[i] = tgy.ptr<short>(i);
-    }
-
     const __m256 vMagThresh = _mm256_set1_ps(225.0f);
     const __m256 vOne = _mm256_set1_ps(1.0f);
+    const __m256i vStep = _mm256_set1_epi32(step);
 
-    for (int r = 0; r < rows - 1; ++r) {
-        for (int c = 0; c < cols - 1; ++c) {
-            __m256 vTotalScore = _mm256_setzero_ps();
-            __m256 vValidCount = _mm256_setzero_ps();
-
-            const __m256 vC = _mm256_set1_ps((float)c);
+    // --- 2. 核心并行循环 ---
+#pragma omp parallel
+    {
+        std::vector<Points> localCandidates;
+#pragma omp for
+        for (int r = 0; r < rows - 1; ++r) {
             const __m256 vR = _mm256_set1_ps((float)r);
 
-            bool passEarlyStage = true;
+            // 一次处理 4 个水平像素块
+            for (int c = 0; c < cols - 4; c += 4) {
+                __m256 vScore0 = _mm256_setzero_ps(), vScore1 = _mm256_setzero_ps();
+                __m256 vScore2 = _mm256_setzero_ps(), vScore3 = _mm256_setzero_ps();
+                __m256 vCount0 = _mm256_setzero_ps(), vCount1 = _mm256_setzero_ps();
+                __m256 vCount2 = _mm256_setzero_ps(), vCount3 = _mm256_setzero_ps();
 
-            for (size_t m = 0; m < alignedPts; m += 8) {
-                // 加载模板 SoA
-                __m256 vDX = _mm256_loadu_ps(&mDX[m]);
-                __m256 vDY = _mm256_loadu_ps(&mDY[m]);
+                const __m256 vC0 = _mm256_set1_ps((float)c);
+                const __m256 vC1 = _mm256_set1_ps((float)(c + 1));
+                const __m256 vC2 = _mm256_set1_ps((float)(c + 2));
+                const __m256 vC3 = _mm256_set1_ps((float)(c + 3));
 
-                __m256i vX0 = _mm256_cvttps_epi32(_mm256_add_ps(vC, vDX));
-                __m256i vY0 = _mm256_cvttps_epi32(_mm256_add_ps(vR, vDY));
+                bool active[4] = { true, true, true, true };
 
-                alignas(32) int32_t x_idx[8], y_idx[8];
-                _mm256_store_si256((__m256i*)x_idx, vX0);
-                _mm256_store_si256((__m256i*)y_idx, vY0);
+                for (size_t m = 0; m < alignedPts; m += 8) {
+                    __m256 vDX = _mm256_loadu_ps(&mDX[m]);
+                    __m256 vDY = _mm256_loadu_ps(&mDY[m]);
+                    __m256 vU = _mm256_loadu_ps(&mU[m]);
+                    __m256 vV = _mm256_loadu_ps(&mV[m]);
 
-                alignas(32) float sx_f[8], sy_f[8];
+                    __m256i vYIdx = _mm256_cvttps_epi32(_mm256_add_ps(vR, vDY));
+                    __m256i vYPart = _mm256_mullo_epi32(vYIdx, vStep);
 
-                // 标量提取
-                for (int i = 0; i < 8; ++i) {
-                    int x = x_idx[i]; int y = y_idx[i];
-                    if (x >= 0 && x < cols - 1 && y >= 0 && y < rows - 1) {
-                        sx_f[i] = (float)((pX[y][x] + pX[y + 1][x + 1]) >> 1);
-                        sy_f[i] = (float)((pY[y][x] + pY[y + 1][x + 1]) >> 1);
-                    }
-                    else {
-                        sx_f[i] = 0; sy_f[i] = 0;
+                    // 计算 4 个位置的 Gather 偏移
+                    __m256i vOff0 = _mm256_add_epi32(vYPart, _mm256_cvttps_epi32(_mm256_add_ps(vC0, vDX)));
+                    __m256i vOff1 = _mm256_add_epi32(vYPart, _mm256_cvttps_epi32(_mm256_add_ps(vC1, vDX)));
+                    __m256i vOff2 = _mm256_add_epi32(vYPart, _mm256_cvttps_epi32(_mm256_add_ps(vC2, vDX)));
+                    __m256i vOff3 = _mm256_add_epi32(vYPart, _mm256_cvttps_epi32(_mm256_add_ps(vC3, vDX)));
+
+                    // 批量发射 Gather (流水线并行核心)
+                    __m256 vSX0 = _mm256_i32gather_ps(pBaseX, vOff0, 4);
+                    __m256 vSX1 = _mm256_i32gather_ps(pBaseX, vOff1, 4);
+                    __m256 vSX2 = _mm256_i32gather_ps(pBaseX, vOff2, 4);
+                    __m256 vSX3 = _mm256_i32gather_ps(pBaseX, vOff3, 4);
+
+                    __m256 vSY0 = _mm256_i32gather_ps(pBaseY, vOff0, 4);
+                    __m256 vSY1 = _mm256_i32gather_ps(pBaseY, vOff1, 4);
+                    __m256 vSY2 = _mm256_i32gather_ps(pBaseY, vOff2, 4);
+                    __m256 vSY3 = _mm256_i32gather_ps(pBaseY, vOff3, 4);
+
+                    // 计算逻辑函数 (Lambda 简化代码阅读)
+                    auto computeBlock = [&](__m256 sx, __m256 sy, __m256& score, __m256& count) {
+                        __m256 magSq = _mm256_add_ps(_mm256_mul_ps(sx, sx), _mm256_mul_ps(sy, sy));
+                        __m256 mask = _mm256_cmp_ps(magSq, vMagThresh, _CMP_GT_OQ);
+                        __m256 dot = _mm256_mul_ps(_mm256_add_ps(_mm256_mul_ps(vU, sx), _mm256_mul_ps(vV, sy)), _mm256_rsqrt_ps(magSq));
+                        score = _mm256_add_ps(score, _mm256_and_ps(mask, dot));
+                        count = _mm256_add_ps(count, _mm256_and_ps(mask, vOne));
+                        };
+
+                    if (active[0]) computeBlock(vSX0, vSY0, vScore0, vCount0);
+                    if (active[1]) computeBlock(vSX1, vSY1, vScore1, vCount1);
+                    if (active[2]) computeBlock(vSX2, vSY2, vScore2, vCount2);
+                    if (active[3]) computeBlock(vSX3, vSY3, vScore3, vCount3);
+
+                    // 早期退出检查 (针对每个 Block 独立判断)
+                    if (m == 16 && nPts > 400) {
+                        if (active[0] && _mm256_reduce_add_ps(vCount0) < (nPts * 0.1f)) active[0] = false;
+                        if (active[1] && _mm256_reduce_add_ps(vCount1) < (nPts * 0.1f)) active[1] = false;
+                        if (active[2] && _mm256_reduce_add_ps(vCount2) < (nPts * 0.1f)) active[2] = false;
+                        if (active[3] && _mm256_reduce_add_ps(vCount3) < (nPts * 0.1f)) active[3] = false;
+                        if (!(active[0] || active[1] || active[2] || active[3])) break;
                     }
                 }
 
-                __m256 vSX = _mm256_load_ps(sx_f);
-                __m256 vSY = _mm256_load_ps(sy_f);
-                __m256 vMagSq = _mm256_add_ps(_mm256_mul_ps(vSX, vSX), _mm256_mul_ps(vSY, vSY));
-                __m256 vMask = _mm256_cmp_ps(vMagSq, vMagThresh, _CMP_GT_OQ);
-
-                __m256 vInvMag = _mm256_rsqrt_ps(vMagSq);
-                __m256 vU = _mm256_loadu_ps(&mU[m]);
-                __m256 vV = _mm256_loadu_ps(&mV[m]);
-                __m256 vDot = _mm256_mul_ps(_mm256_add_ps(_mm256_mul_ps(vU, vSX), _mm256_mul_ps(vV, vSY)), vInvMag);
-
-                vTotalScore = _mm256_add_ps(vTotalScore, _mm256_and_ps(vMask, vDot));
-                vValidCount = _mm256_add_ps(vValidCount, _mm256_and_ps(vMask, vOne));
-
-                // 处理完 16 个点（2个 AVX 块）后检查一次
-                if (m == 8 && nPts > 24) {
-                    float curVC = _mm256_reduce_add_ps(vValidCount);
-                    float curTS = _mm256_reduce_add_ps(vTotalScore);
-
-                    if (curVC < (nPts / 20 * 0.355f)) {
-                        passEarlyStage = false;
-                        break;
+                // 结果处理
+                auto finalize = [&](int colOffset, __m256 count, __m256 score) {
+                    float fCount = _mm256_reduce_add_ps(count);
+                    if (fCount > nPts * 0.5f) {
+                        float fScore = _mm256_reduce_add_ps(score) / nPts;
+                        if (fScore >= minScore) localCandidates.push_back({ (float)(c + colOffset), (float)r, 0, 0, fScore });
                     }
-                }
-            }
+                    };
 
-            if (!passEarlyStage) continue;
-
-            float finalValid = _mm256_reduce_add_ps(vValidCount);
-            if (finalValid > nPts * 0.05f) {
-                float finalScore = _mm256_reduce_add_ps(vTotalScore) / nPts;
-                if (finalScore >= minScore) {
-                    allCandidates.push_back({ (float)c, (float)r, 0, 0, finalScore });
-                }
+                if (active[0]) finalize(0, vCount0, vScore0);
+                if (active[1]) finalize(1, vCount1, vScore1);
+                if (active[2]) finalize(2, vCount2, vScore2);
+                if (active[3]) finalize(3, vCount3, vScore3);
             }
         }
+#pragma omp critical
+        allCandidates.insert(allCandidates.end(), localCandidates.begin(), localCandidates.end());
     }
 
-    // NMS 处理
-    if (allCandidates.size() > 1) {
-        applyNMS(allCandidates, minDist); 
-    }
-
+    if (allCandidates.size() > 1) applyNMS(allCandidates, minDist);
     return allCandidates;
 }
 
@@ -183,7 +205,7 @@ void downsample2x2_simd(const cv::Mat& src, cv::Mat& dst) {
 float PointScore(const cv::Mat& tgx, const cv::Mat& tgy,
     const std::vector<Points>& instPoints,
     int r, int c) {
-    int validCount = 0;
+    unsigned int validCount = 0;
     float totalCosineScore = 0.0f;
 
     const short* pGdxBase = tgx.ptr<short>(0);
@@ -251,12 +273,12 @@ std::vector<Points> matchModelPyramidN(
     }
 
     unsigned int topIdx = numLevels - 1;
-     
+
     // 寻找顶层的粗特征
     std::vector<Points> LayerResults = findAllMatches(
         pyramidGx[topIdx], pyramidGy[topIdx],
         pyramidModels[topIdx],
-        0.7f, // 匹配分数
+        0.55f, // 匹配分数
         4.0f // 距离
     );
 
@@ -267,20 +289,20 @@ std::vector<Points> matchModelPyramidN(
         const auto& curGx = pyramidGx[level];
         const auto& curGy = pyramidGy[level];
         const auto& curModel = pyramidModels[level];
-        int rows = curGx.rows;
-        int cols = curGx.cols;
+        const int rows = curGx.rows;
+        const int cols = curGx.cols;
 
         float currentThreshold = 0.55f;
 
         for (const auto& prevRes : LayerResults) {
-            int cx = static_cast<int>(prevRes.dx + prevRes.dx + 0.5f);
-            int cy = static_cast<int>(prevRes.dy + prevRes.dy + 0.5f);
+            const int cx = static_cast<int>(prevRes.dx + prevRes.dx + 0.5f);
+            const int cy = static_cast<int>(prevRes.dy + prevRes.dy + 0.5f);
 
             // 5 * 5
-            int rStart = std::max(0, cy - 2);
-            int rEnd = std::min(rows - 1, cy + 2);
-            int cStart = std::max(0, cx - 2);
-            int cEnd = std::min(cols - 1, cx + 2);
+            const int rStart = std::max(0, cy - 2);
+            const int rEnd = std::min(rows - 1, cy + 2);
+            const int cStart = std::max(0, cx - 2);
+            const int cEnd = std::min(cols - 1, cx + 2);
 
             Points bestLocal = { };
 
