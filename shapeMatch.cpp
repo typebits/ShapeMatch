@@ -2,15 +2,21 @@
 
 // 高性能水平累加
 inline float _mm256_reduce_add_ps(__m256 v) {
-    __m128 lo = _mm256_castps256_ps128(v);
-    __m128 hi = _mm256_extractf128_ps(v, 1);
-    lo = _mm_add_ps(lo, hi);
-    __m128 shuf = _mm_movehdup_ps(lo);
-    lo = _mm_add_ps(lo, shuf);
-    shuf = _mm_movehl_ps(shuf, lo);
-    lo = _mm_add_ss(lo, shuf);
-    return _mm_cvtss_f32(lo);
+    __m128 x128 = _mm_add_ps(_mm256_extractf128_ps(v, 1), _mm256_castps256_ps128(v));
+    __m128 x64 = _mm_add_ps(x128, _mm_movehl_ps(x128, x128));
+    __m128 x32 = _mm_add_ss(x64, _mm_shuffle_ps(x64, x64, 0x55));
+    return _mm_cvtss_f32(x32);
 }
+
+// 对齐内存分配助手
+template <typename T>
+struct AlignedVector {
+    T* data;
+    size_t sz;
+    AlignedVector(size_t n) : sz(n) { data = (T*)_mm_malloc(n * sizeof(T), 32); }
+    ~AlignedVector() { _mm_free(data); }
+    T* get() { return data; }
+};
 
 std::vector<Points> findAllMatches(const cv::Mat& tgx, const cv::Mat& tgy,
     std::vector<Points> modelPoints, float minScore, float minDist) {
@@ -18,116 +24,113 @@ std::vector<Points> findAllMatches(const cv::Mat& tgx, const cv::Mat& tgy,
     const int rows = tgx.rows;
     const int cols = tgx.cols;
     const size_t nPts = modelPoints.size();
-    std::vector<Points> allCandidates;
-    if (nPts == 0) return allCandidates;
+    if (nPts == 0) return {};
 
-    // --- 1. 预处理：Float 转换与平滑 (必须移出主循环) ---
+    // --- 1. 预处理：确定安全边界 ---
+    int minDx = 0, maxDx = 0, minDy = 0, maxDy = 0;
+    for (const auto& pt : modelPoints) {
+        minDx = std::min(minDx, (int)std::floor(pt.dx));
+        maxDx = std::max(maxDx, (int)std::ceil(pt.dx));
+        minDy = std::min(minDy, (int)std::floor(pt.dy));
+        maxDy = std::max(maxDy, (int)std::ceil(pt.dy));
+    }
+
+    // --- 2. 图像准备：确保连续性与类型 ---
     cv::Mat tgxf, tgyf;
     tgx.convertTo(tgxf, CV_32F);
     tgy.convertTo(tgyf, CV_32F);
-    // 可选：在这里做一次 2x2 boxFilter 代替之前的 (p+p)>>1 逻辑
+    // clone 保证内存绝对连续且无行尾 padding
+    if (!tgxf.isContinuous()) tgxf = tgxf.clone();
+    if (!tgyf.isContinuous()) tgyf = tgyf.clone();
 
-    const float* pBaseX = (const float*)tgxf.data;
-    const float* pBaseY = (const float*)tgyf.data;
-    const int step = (int)(tgxf.step / sizeof(float));
+    const float* pBaseX = tgxf.ptr<float>(0);
+    const float* pBaseY = tgyf.ptr<float>(0);
+    const int step = (int)(tgxf.step1());
 
-    // SoA 布局
+    // --- 3. SoA 布局与对齐分配 ---
     size_t alignedPts = (nPts + 7) & ~7;
-    std::vector<float> mDX(alignedPts, 0), mDY(alignedPts, 0), mU(alignedPts, 0), mV(alignedPts, 0);
-    for (size_t i = 0; i < nPts; ++i) {
-        mDX[i] = modelPoints[i].dx; mDY[i] = modelPoints[i].dy;
-        mU[i] = modelPoints[i].u;   mV[i] = modelPoints[i].v;
+    AlignedVector<float> mU(alignedPts), mV(alignedPts);
+    AlignedVector<int32_t> mOffA(alignedPts), mOffB(alignedPts);
+
+    // 预计算
+    for (size_t i = 0; i < alignedPts; ++i) {
+        if (i < nPts) {
+            mU.get()[i] = modelPoints[i].u;
+            mV.get()[i] = modelPoints[i].v;
+            int dx = (int)std::round(modelPoints[i].dx);
+            int dy = (int)std::round(modelPoints[i].dy);
+            mOffA.get()[i] = dy * step + dx;
+            mOffB.get()[i] = (dy + 1) * step + (dx + 1);
+        }
+        else {
+            mU.get()[i] = mV.get()[i] = 0;
+            mOffA.get()[i] = mOffB.get()[i] = 0;
+        }
     }
 
     const __m256 vMagThresh = _mm256_set1_ps(225.0f);
     const __m256 vOne = _mm256_set1_ps(1.0f);
-    const __m256i vStep = _mm256_set1_epi32(step);
+    const __m256 v05 = _mm256_set1_ps(0.5f);
+    const float invNPts = 1.0f / nPts;
+    const float countLimit = nPts * 0.05f;
 
-    // --- 2. 核心并行循环 ---
+    std::vector<Points> allCandidates;
+
 #pragma omp parallel
     {
         std::vector<Points> localCandidates;
+        // 调整循环范围避开非法索引
+        // 这里的起始点 abs(minDy) 和终止点 rows - maxDy - 2 是核心
 #pragma omp for
-        for (int r = 0; r < rows - 1; ++r) {
-            const __m256 vR = _mm256_set1_ps((float)r);
+        for (int r = std::max(0, -minDy); r < std::min(rows - 1, rows - maxDy - 1); ++r) {
+            int rowBase = r * step;
+            for (int c = std::max(0, -minDx); c < std::min(cols - 1, cols - maxDx - 1); ++c) {
 
-            // 一次处理 4 个水平像素块
-            for (int c = 0; c < cols - 4; c += 4) {
-                __m256 vScore0 = _mm256_setzero_ps(), vScore1 = _mm256_setzero_ps();
-                __m256 vScore2 = _mm256_setzero_ps(), vScore3 = _mm256_setzero_ps();
-                __m256 vCount0 = _mm256_setzero_ps(), vCount1 = _mm256_setzero_ps();
-                __m256 vCount2 = _mm256_setzero_ps(), vCount3 = _mm256_setzero_ps();
+                __m256 vTotalScore = _mm256_setzero_ps();
+                __m256 vValidCount = _mm256_setzero_ps();
+                __m256i vBaseIdx = _mm256_set1_epi32(rowBase + c);
 
-                const __m256 vC0 = _mm256_set1_ps((float)c);
-                const __m256 vC1 = _mm256_set1_ps((float)(c + 1));
-                const __m256 vC2 = _mm256_set1_ps((float)(c + 2));
-                const __m256 vC3 = _mm256_set1_ps((float)(c + 3));
-
-                bool active[4] = { true, true, true, true };
-
+                bool passEarlyStage = true;
                 for (size_t m = 0; m < alignedPts; m += 8) {
-                    __m256 vDX = _mm256_loadu_ps(&mDX[m]);
-                    __m256 vDY = _mm256_loadu_ps(&mDY[m]);
-                    __m256 vU = _mm256_loadu_ps(&mU[m]);
-                    __m256 vV = _mm256_loadu_ps(&mV[m]);
+                    // 使用对齐加载 load_si256 / load_ps
+                    __m256i vIdxA = _mm256_add_epi32(vBaseIdx, _mm256_load_si256((__m256i*) & mOffA.get()[m]));
+                    __m256i vIdxB = _mm256_add_epi32(vBaseIdx, _mm256_load_si256((__m256i*) & mOffB.get()[m]));
 
-                    __m256i vYIdx = _mm256_cvttps_epi32(_mm256_add_ps(vR, vDY));
-                    __m256i vYPart = _mm256_mullo_epi32(vYIdx, vStep);
+                    __m256 sx = _mm256_mul_ps(_mm256_add_ps(_mm256_i32gather_ps(pBaseX, vIdxA, 4), _mm256_i32gather_ps(pBaseX, vIdxB, 4)), v05);
+                    __m256 sy = _mm256_mul_ps(_mm256_add_ps(_mm256_i32gather_ps(pBaseY, vIdxA, 4), _mm256_i32gather_ps(pBaseY, vIdxB, 4)), v05);
 
-                    // 计算 4 个位置的 Gather 偏移
-                    __m256i vOff0 = _mm256_add_epi32(vYPart, _mm256_cvttps_epi32(_mm256_add_ps(vC0, vDX)));
-                    __m256i vOff1 = _mm256_add_epi32(vYPart, _mm256_cvttps_epi32(_mm256_add_ps(vC1, vDX)));
-                    __m256i vOff2 = _mm256_add_epi32(vYPart, _mm256_cvttps_epi32(_mm256_add_ps(vC2, vDX)));
-                    __m256i vOff3 = _mm256_add_epi32(vYPart, _mm256_cvttps_epi32(_mm256_add_ps(vC3, vDX)));
+                    __m256 magSq = _mm256_add_ps(_mm256_mul_ps(sx, sx), _mm256_mul_ps(sy, sy));
+                    __m256 mask = _mm256_cmp_ps(magSq, vMagThresh, _CMP_GT_OQ);
 
-                    // 批量发射 Gather (流水线并行核心)
-                    __m256 vSX0 = _mm256_i32gather_ps(pBaseX, vOff0, 4);
-                    __m256 vSX1 = _mm256_i32gather_ps(pBaseX, vOff1, 4);
-                    __m256 vSX2 = _mm256_i32gather_ps(pBaseX, vOff2, 4);
-                    __m256 vSX3 = _mm256_i32gather_ps(pBaseX, vOff3, 4);
+                    __m256 invMag = _mm256_rsqrt_ps(magSq);
+                    __m256 vU = _mm256_load_ps(&mU.get()[m]);
+                    __m256 vV = _mm256_load_ps(&mV.get()[m]);
 
-                    __m256 vSY0 = _mm256_i32gather_ps(pBaseY, vOff0, 4);
-                    __m256 vSY1 = _mm256_i32gather_ps(pBaseY, vOff1, 4);
-                    __m256 vSY2 = _mm256_i32gather_ps(pBaseY, vOff2, 4);
-                    __m256 vSY3 = _mm256_i32gather_ps(pBaseY, vOff3, 4);
+                    // Dot = U*sx + V*sy
+                    __m256 dot = _mm256_add_ps(_mm256_mul_ps(vU, sx), _mm256_mul_ps(vV, sy));
+                    dot = _mm256_mul_ps(dot, invMag);
 
-                    // 计算逻辑函数 (Lambda 简化代码阅读)
-                    auto computeBlock = [&](__m256 sx, __m256 sy, __m256& score, __m256& count) {
-                        __m256 magSq = _mm256_add_ps(_mm256_mul_ps(sx, sx), _mm256_mul_ps(sy, sy));
-                        __m256 mask = _mm256_cmp_ps(magSq, vMagThresh, _CMP_GT_OQ);
-                        __m256 dot = _mm256_mul_ps(_mm256_add_ps(_mm256_mul_ps(vU, sx), _mm256_mul_ps(vV, sy)), _mm256_rsqrt_ps(magSq));
-                        score = _mm256_add_ps(score, _mm256_and_ps(mask, dot));
-                        count = _mm256_add_ps(count, _mm256_and_ps(mask, vOne));
-                        };
+                    vTotalScore = _mm256_add_ps(vTotalScore, _mm256_and_ps(mask, dot));
+                    vValidCount = _mm256_add_ps(vValidCount, _mm256_and_ps(mask, vOne));
 
-                    if (active[0]) computeBlock(vSX0, vSY0, vScore0, vCount0);
-                    if (active[1]) computeBlock(vSX1, vSY1, vScore1, vCount1);
-                    if (active[2]) computeBlock(vSX2, vSY2, vScore2, vCount2);
-                    if (active[3]) computeBlock(vSX3, vSY3, vScore3, vCount3);
-
-                    // 早期退出检查 (针对每个 Block 独立判断)
-                    if (m == 16 && nPts > 400) {
-                        if (active[0] && _mm256_reduce_add_ps(vCount0) < (nPts * 0.1f)) active[0] = false;
-                        if (active[1] && _mm256_reduce_add_ps(vCount1) < (nPts * 0.1f)) active[1] = false;
-                        if (active[2] && _mm256_reduce_add_ps(vCount2) < (nPts * 0.1f)) active[2] = false;
-                        if (active[3] && _mm256_reduce_add_ps(vCount3) < (nPts * 0.1f)) active[3] = false;
-                        if (!(active[0] || active[1] || active[2] || active[3])) break;
+                    // 早期退出检查
+                    if (m == 16 && nPts > 64) {
+                        if (_mm256_reduce_add_ps(vValidCount) < (nPts * 0.02f)) {
+                            passEarlyStage = false;
+                            break;
+                        }
                     }
                 }
 
-                // 结果处理
-                auto finalize = [&](int colOffset, __m256 count, __m256 score) {
-                    float fCount = _mm256_reduce_add_ps(count);
-                    if (fCount > nPts * 0.5f) {
-                        float fScore = _mm256_reduce_add_ps(score) / nPts;
-                        if (fScore >= minScore) localCandidates.push_back({ (float)(c + colOffset), (float)r, 0, 0, fScore });
+                if (passEarlyStage) {
+                    float finalValid = _mm256_reduce_add_ps(vValidCount);
+                    if (finalValid > countLimit) {
+                        float finalScore = _mm256_reduce_add_ps(vTotalScore) * invNPts;
+                        if (finalScore >= minScore) {
+                            localCandidates.push_back({ (float)c, (float)r, 0.0f, 0.0f, finalScore });
+                        }
                     }
-                    };
-
-                if (active[0]) finalize(0, vCount0, vScore0);
-                if (active[1]) finalize(1, vCount1, vScore1);
-                if (active[2]) finalize(2, vCount2, vScore2);
-                if (active[3]) finalize(3, vCount3, vScore3);
+                }
             }
         }
 #pragma omp critical
@@ -137,25 +140,6 @@ std::vector<Points> findAllMatches(const cv::Mat& tgx, const cv::Mat& tgy,
     if (allCandidates.size() > 1) applyNMS(allCandidates, minDist);
     return allCandidates;
 }
-
-void downsample2x2(const cv::Mat& src, cv::Mat& dst) {
-    int dstRows = src.rows >> 1;
-    int dstCols = src.cols >> 1;
-    dst.create(dstRows, dstCols, src.type());
-
-    for (int r = 0; r < dstRows; ++r) {
-        const short* s1 = src.ptr<short>(2 * r);
-        const short* s2 = src.ptr<short>(2 * r + 1);
-        short* d = dst.ptr<short>(r);
-
-        for (int c = 0; c < dstCols; ++c) {
-            *d++ = (s1[0] + s1[1] + s2[0] + s2[1]) >> 2;// 除以4
-            s1 += 2;
-            s2 += 2;
-        }
-    }
-}
-
 void downsample2x2_simd(const cv::Mat& src, cv::Mat& dst) {
     int dstRows = src.rows >> 1;
     int dstCols = src.cols >> 1;
@@ -278,7 +262,7 @@ std::vector<Points> matchModelPyramidN(
     std::vector<Points> LayerResults = findAllMatches(
         pyramidGx[topIdx], pyramidGy[topIdx],
         pyramidModels[topIdx],
-        0.55f, // 匹配分数
+        0.45f, // 匹配分数
         4.0f // 距离
     );
 
