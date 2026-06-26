@@ -1,3 +1,4 @@
+#define _USE_MATH_DEFINES
 #pragma once
 #include <opencv2/opencv.hpp>
 #include <vector>
@@ -13,20 +14,20 @@ struct Points {
     float angle;
 };
 
-std::vector<Points> findAllMatches(const cv::Mat& tgx, const cv::Mat& tgy,
-    //const std::vector<Points>& instances,
-    std::vector<Points> instances,
-    float minScore, float minDist);
+std::vector<Points> findAllMatches(const cv::Mat& tgxf, const cv::Mat& tgyf,
+    const std::vector<Points>& modelPoints, float minScore, float minDist);
 
-void downsample2x2(const cv::Mat& src, cv::Mat& dst);
+void downsample2x2_simd(const cv::Mat& src, cv::Mat& dst);
 
-float PointScore(const cv::Mat& tgx, const cv::Mat& tgy, const std::vector<Points>& inst, int r, int c);
-
+float PointScore(const cv::Mat& tgx, const cv::Mat& tgy,
+    const std::vector<Points>& instPoints, int r, int c);
 
 std::vector<Points> matchModelPyramidN(
     std::vector<cv::Mat>& pyramidGx,
     std::vector<cv::Mat>& pyramidGy,
-    std::vector<std::vector<Points>> pyramidModels,
+    const cv::Mat& topGxF,
+    const cv::Mat& topGyF,
+    const std::vector<std::vector<Points>>& pyramidModels,
     int numLevels
 );
 
