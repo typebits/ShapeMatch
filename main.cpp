@@ -2,6 +2,11 @@
 #include "shapeMatch.h"
 #include "shapeTrain.h"
 
+struct ModelPyramid {
+    // 存储该角度下所有层级的模板：[Level][Points]
+    std::vector<std::vector<Points>> levels;
+};
+
 int main() {
     cv::Mat img_temp = cv::imread("Asset\\temp3.png");
     cv::Mat img_target = cv::imread("Asset\\target3.png");
@@ -43,7 +48,7 @@ int main() {
     float angleStart = 0.0f;
     float angleEnd = 360.0f;
     float angleStep = 12.0f;
-    float Score = 0.8f;
+    float Score = 0.75f;
 
     std::vector<Points> allResults;
     std::vector<std::vector<Points>> templates;
@@ -88,43 +93,54 @@ int main() {
         invFactors[l] = 1.0f / static_cast<float>(1 << l);
     }
 
+    
+
+    // 1. 预计算阶段 (在并行循环外)
+    std::vector<ModelPyramid> precomputedModels(templates.size());
+
+    for (size_t i = 0; i < templates.size(); ++i) {
+        const auto& rootTemplate = templates[i];
+        size_t nPts = rootTemplate.size();
+
+        precomputedModels[i].levels.resize(Levels);
+        precomputedModels[i].levels[0] = rootTemplate; // 第0层是原始模板
+
+        for (int l = 1; l < Levels; ++l) {
+            float factor = invFactors[l];
+            precomputedModels[i].levels[l].resize(nPts);
+            for (size_t p = 0; p < nPts; ++p) {
+                precomputedModels[i].levels[l][p] = {
+                    rootTemplate[p].dx * factor,
+                    rootTemplate[p].dy * factor,
+                    rootTemplate[p].u,
+                    rootTemplate[p].v,
+                    0.0f
+                };
+            }
+        }
+    }
     auto start = std::chrono::high_resolution_clock::now();
 
-    #pragma omp parallel for schedule(static, 1)
+    // 2. 并行匹配阶段 (在 omp parallel 循环内)
+    #pragma omp parallel for
     for (int i = 0; i < (int)templates.size(); ++i) {
         int tid = omp_get_thread_num();
 
-        const auto& currentRootTemplate = templates[i];
-        threadPyramids[tid][0] = currentRootTemplate;
-        size_t nPts = currentRootTemplate.size();
+        // 直接使用预计算好的模型，避免 resize 和坐标转换
+        const auto& modelPyramid = precomputedModels[i].levels;
 
-        for (int l = 1; l < Levels; ++l) {
-            auto& currentLevelVec = threadPyramids[tid][l];
-            currentLevelVec.resize(nPts);
-            float factor = invFactors[l];
-            for (size_t p = 0; p < nPts; ++p) {
-                Points lowPt = currentRootTemplate[p];
-                lowPt.dx *= factor;
-                lowPt.dy *= factor;
-                currentLevelVec[p] = lowPt;
-            }
-        }
-
-        auto results = matchModelPyramidN(pyramidGx, pyramidGy, topGxF, topGyF, threadPyramids[tid], Levels);
+        // 假设 matchModelPyramidN 支持传入预计算好的模型
+        auto results = matchModelPyramidN(pyramidGx, pyramidGy, topGxF, topGyF, modelPyramid, Levels);
 
         if (!results.empty()) {
             float currentAngle = angleStart + static_cast<float>(i) * angleStep;
-            for (size_t k = 0; k < results.size(); ++k) {
-                results[k].angle = currentAngle;
-            }
-            if (results.size() > 1) {
-                applyNMS(results, 30.0f, 5.0f);
+            for (auto& res : results) {
+                res.angle = currentAngle;
             }
             threadLocalResults[tid].insert(threadLocalResults[tid].end(), results.begin(), results.end());
         }
     }
 
-    // 单线程快速无冲突合并
     for (int t = 0; t < maxThreads; ++t) {
         if (!threadLocalResults[t].empty()) {
             allResults.insert(allResults.end(), threadLocalResults[t].begin(), threadLocalResults[t].end());

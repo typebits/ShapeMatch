@@ -25,7 +25,7 @@ std::vector<Points> findAllMatches(const cv::Mat& tgxf, const cv::Mat& tgyf,
     const int step = (int)(tgxf.step1());
 
     const size_t nPts = modelPoints.size();
-    float countLimit = nPts * 0.05f;
+    float Limit = nPts * 0.03f;
     if (nPts == 0) return {};
 
 
@@ -79,9 +79,6 @@ std::vector<Points> findAllMatches(const cv::Mat& tgxf, const cv::Mat& tgyf,
         const __m256 vU = _mm256_set1_ps(m_u);
         const __m256 vV = _mm256_set1_ps(m_v);
 
-        // 检查是否到了原版的第 16 个点剪枝卡点
-        bool isPruneStage = (m == 16 && nPts > 64);
-
         for (int r = rStart; r < rEnd; ++r) {
             int rowBase = r * step;
             int roiRowOffset = (r - rStart) * width;
@@ -127,12 +124,11 @@ std::vector<Points> findAllMatches(const cv::Mat& tgxf, const cv::Mat& tgyf,
                 _mm256_storeu_ps(pDstCount + c, vHistoryCount);
 
                 // 【严格恢复剪枝逻辑】如果在第16个特征点，检查并标记未达标的像素
-                if (isPruneStage) {
+                if (m == 16) {
                     alignas(32) float counts[8];
                     _mm256_store_ps(counts, vHistoryCount);
-                    float thresh = nPts * 0.02f;
                     for (int k = 0; k < 8; ++k) {
-                        if (counts[k] < thresh) {
+                        if (counts[k] < Limit) {
                             pPassed[c + k] = 0; // 0 表示未通过
                         }
                     }
@@ -140,39 +136,43 @@ std::vector<Points> findAllMatches(const cv::Mat& tgxf, const cv::Mat& tgyf,
             }
 
             // 处理余数边界像素
-            for (; c < width; ++c) {
-                if (isPruneStage && !pPassed[c]) continue;
+            //for (; c < width; ++c) {
+            //    if (isPruneStage && !pPassed[c]) continue;
 
-                int actualC = cStart + c;
-                float sx = (pX_A[actualC] + pX_B[actualC]) * 0.5f;
-                float sy = (pY_A[actualC] + pY_B[actualC]) * 0.5f;
-                size_t idx = (size_t)roiRowOffset + c;
-                float magSq = sx * sx + sy * sy;
-                if (magSq > 225.0f) {
-                    float invMag = 1.0f / std::sqrt(magSq);
-                    float dot = (m_u * sx + m_v * sy) * invMag;
-                    size_t idx = (size_t)roiRowOffset + c;
-                    pDstScore[c] += dot;
-                    pDstCount[c] += 1.0f;
-                }
-                if (pixelPassed[idx] && validCountMap[idx] > countLimit) {
-                    pPassed[c] = false;
-                }
-            }
+            //    int actualC = cStart + c;
+            //    float sx = (pX_A[actualC] + pX_B[actualC]) * 0.5f;
+            //    float sy = (pY_A[actualC] + pY_B[actualC]) * 0.5f;
+            //    size_t idx = (size_t)roiRowOffset + c;
+            //    float magSq = sx * sx + sy * sy;
+            //    if (magSq > 225.0f) {
+            //        float invMag = 1.0f / std::sqrt(magSq);
+            //        float dot = (m_u * sx + m_v * sy) * invMag;
+            //        size_t idx = (size_t)roiRowOffset + c;
+            //        pDstScore[c] += dot;
+            //        pDstCount[c] += 1.0f;
+            //    }
+            //    if (pixelPassed[idx] && validCountMap[idx] > countLimit) {
+            //        pPassed[c] = false;
+            //    }
+            //}
         }
     }
 
     std::vector<Points> localCandidates;
-    float invNPts = 1.0f / nPts;
-    //float countLimit = nPts * 0.05f;
+    localCandidates.reserve(128); // 预留少量内存，避免初始分配开销
+
+    const float invNPts = 1.0f / nPts;
 
     for (int r = rStart; r < rEnd; ++r) {
-        int roiRowOffset = (r - rStart) * width;
+        const int roiRowOffset = (r - rStart) * width;
+        const float* pScore = &totalScoreMap[roiRowOffset];
+        const float* pCount = &validCountMap[roiRowOffset];
+        const uint8_t* pPassed = &pixelPassed[roiRowOffset];
+
         for (int c = 0; c < width; ++c) {
-            size_t idx = roiRowOffset + c;
-            // 必须通过早期剪枝，且最终有效点数大于 countLimit
-            if (pixelPassed[idx] && validCountMap[idx] > countLimit) {
-                float finalScore = totalScoreMap[idx] * invNPts;
+            // 将所有逻辑条件合并，减少 if 嵌套
+            if (pPassed[c] && pCount[c] > Limit) {
+                float finalScore = pScore[c] * invNPts;
                 if (finalScore >= minScore) {
                     localCandidates.push_back({ (float)(cStart + c), (float)r, 0.0f, 0.0f, finalScore });
                 }
@@ -366,7 +366,7 @@ void drawPoints(cv::Mat& img_target, const std::vector<Points>& allResults,
             int targetX = cvRound(result.dx + mp.dx * cosA - mp.dy * sinA);
             int targetY = cvRound(result.dy + mp.dx * sinA + mp.dy * cosA);
             if (targetX >= 0 && targetX < img_target.cols && targetY >= 0 && targetY < img_target.rows) {
-                img_target.at<cv::Vec3b>(targetY, targetX) = cv::Vec3b(0, 255, 0);
+                cv::circle(img_target, cv::Point(targetX, targetY), 2, cv::Scalar(0, 255, 0), -1);
             }
         }
 

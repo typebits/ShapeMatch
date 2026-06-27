@@ -57,14 +57,18 @@ std::vector<Points> extractModelPoints(const cv::Mat& src) {
     if (mu.m00 == 0) return modelPoints; // 防止除以0
     cv::Point2f center(mu.m10 / mu.m00, mu.m01 / mu.m00);
 
-    modelPoints.reserve(templateContour.size());
-    for (const auto& pt : templateContour) {
+    cv::Mat visual;
+    cv::cvtColor(src, visual, cv::COLOR_GRAY2BGR);
+
+    modelPoints.reserve(templateContour.size() / 2);
+    for (size_t i = 0; i < templateContour.size(); i += 2) {
+        const auto& pt = templateContour[i];
         // 访问梯度值 y 是行，x 是列
         float gx = (float)small_gx.at<short>(pt.y, pt.x);
         float gy = (float)small_gy.at<short>(pt.y, pt.x);
 
         float magSq = gx * gx + gy * gy;
-        if (magSq > 0.01) {
+        if (magSq > 225.0f) {
             float invMag = 1.0f / std::sqrt(magSq);
             Points smp;
             smp.dx = (float)pt.x - center.x;
@@ -72,13 +76,10 @@ std::vector<Points> extractModelPoints(const cv::Mat& src) {
             smp.u = gx * invMag;
             smp.v = gy * invMag;
             modelPoints.push_back(smp);// 归一化
+
+            cv::circle(visual, pt, 2, cv::Scalar(0, 255, 0), -1);
         }
     }
-
-    cv::Mat visual;
-    cv::cvtColor(src, visual, cv::COLOR_GRAY2BGR); // 转为彩色以便画彩线
-
-    cv::drawContours(visual, contours, -1, cv::Scalar(0, 255, 0), 2); // 绿色
 
     //cv::imshow("模板轮廓", visual);
     //cv::waitKey(0);
